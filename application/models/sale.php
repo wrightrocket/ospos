@@ -28,7 +28,7 @@ class Sale extends CI_Model
 		return $success;
 	}
 	
-	function save ($items,$customer_id,$employee_id,$comment,$payments,$sale_id=false)
+function save ($items,$customer_id,$employee_id,$comment,$payments,$sale_id=false)
 	{
 		if(count($items)==0)
 			return -1;
@@ -54,26 +54,7 @@ class Sale extends CI_Model
 
 		$this->db->insert('sales',$sales_data);
 		$sale_id = $this->db->insert_id();
-
-		foreach($payments as $payment_id=>$payment)
-		{
-			if ( substr( $payment['payment_type'], 0, strlen( $this->lang->line('sales_giftcard') ) ) == $this->lang->line('sales_giftcard') )
-			{
-				/* We have a gift card and we have to deduct the used value from the total value of the card. */
-				$splitpayment = explode( ':', $payment['payment_type'] );
-				$cur_giftcard_value = $this->Giftcard->get_giftcard_value( $splitpayment[1] );
-				$this->Giftcard->update_giftcard_value( $splitpayment[1], $cur_giftcard_value - $payment['payment_amount'] );
-			}
-
-			$sales_payments_data = array
-			(
-				'sale_id'=>$sale_id,
-				'payment_type'=>$payment['payment_type'],
-				'payment_amount'=>$payment['payment_amount']
-			);
-			$this->db->insert('sales_payments',$sales_payments_data);
-		}
-
+		
 		foreach($items as $line=>$item)
 		{
 			$cur_item_info = $this->Item->get_info($item['item_id']);
@@ -88,14 +69,17 @@ class Sale extends CI_Model
 				'quantity_purchased'=>$item['quantity'],
 				'discount_percent'=>$item['discount'],
 				'item_cost_price' => $cur_item_info->cost_price,
-				'item_unit_price'=>$item['price']
+				'item_unit_price'=>$item['price'],
+				'item_location'=>$item['item_location']
 			);
-
 			$this->db->insert('sales_items',$sales_items_data);
-
+		
 			//Update stock quantity
-			$item_data = array('quantity'=>$cur_item_info->quantity - $item['quantity']);
-			$this->Item->save($item_data,$item['item_id']);
+			$item_quantity = $this->Item_quantities->get_item_quantity($item['item_id'], $item['item_location']);       
+            $this->Item_quantities->save(array('quantity'=>$item_quantity->quantity - $item['quantity'],
+                                              'item_id'=>$item['item_id'],
+                                              'location_id'=>$item['item_location']), $item['item_id'], $item['item_location']);
+	
 			
 			//Ramel Inventory Tracking
 			//Inventory Count Details
@@ -106,15 +90,19 @@ class Sale extends CI_Model
 				'trans_date'=>date('Y-m-d H:i:s'),
 				'trans_items'=>$item['item_id'],
 				'trans_user'=>$employee_id,
+				'trans_location'=>$item['item_location'],
 				'trans_comment'=>$sale_remarks,
 				'trans_inventory'=>$qty_buy
 			);
 			$this->Inventory->insert($inv_data);
 			//------------------------------------Ramel
 
+			
 			$customer = $this->Customer->get_info($customer_id);
+			
  			if ($customer_id == -1 or $customer->taxable)
  			{
+				$i = 0;
 				foreach($this->Item_taxes->get_info($item['item_id']) as $row)
 				{
 					$this->db->insert('sales_items_taxes', array(
@@ -126,6 +114,43 @@ class Sale extends CI_Model
 					));
 				}
 			}
+		}
+		
+		// Keith Wright
+		$order_total = $this->sale_lib->get_total();
+		$payment_total = 0;
+		
+		foreach($payments as $payment_id=>$payment)
+		{
+			if ( substr( $payment['payment_type'], 0, strlen( $this->lang->line('sales_giftcard') ) ) == $this->lang->line('sales_giftcard') )
+			{
+				/* We have a gift card and we have to deduct the used value from the total value of the card. */
+				$splitpayment = explode( ':', $payment['payment_type'] );
+				$cur_giftcard_value = $this->Giftcard->get_giftcard_value( $splitpayment[1] );
+				$this->Giftcard->update_giftcard_value( $splitpayment[1], $cur_giftcard_value - $payment['payment_amount'] );
+			}
+
+			if ($payment['payment_amount'] + $payment_total > $order_total) {
+				// Keith Wright
+				// The last payment type added will get the amount back
+				$payment['payment_amount'] = $order_total - $payment_total;
+			}
+			$sales_payments_data = array
+			(
+				'sale_id'=>$sale_id,
+				'payment_type'=>$payment['payment_type'],
+				'payment_amount'=>$payment['payment_amount']
+			);
+			
+			/* Keith Wright for Creative Instinct
+			* Previously there was a problem that occurred if the
+			* total of payments exceeded the total of the sales_items.
+			* This block has been moved down below where the total can 
+			* be calculated and checked to see if it is in excess of the payments.
+			* and then reduce the final payment to only what is due.
+			* This corrects the Payments Summary report if change is given to the customer.
+			*/
+			$this->db->insert('sales_payments',$sales_payments_data);
 		}
 		$this->db->trans_complete();
 		
